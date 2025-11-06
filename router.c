@@ -3,19 +3,18 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include <resolv.h>
-#include <errno.h>
 
 #define MAX_LINE 128
 #define MAX_ROUTES 128
 
-/* Estructura para almacenar una entrada de la tabla de reenvío */
+// Estructura para almacenar una entrada de la tabla de reenvío
 typedef struct {
     struct in_addr net;   // Dirección de red (en orden de red)
     int sufijo;           // Longitud del sufijo
     int iface;            // interfaz de salida
 } route_t;
 
-/* Devuelve la máscara (en orden de red) a partir del sufijo */
+// Devuelve la máscara (en orden de red) a partir del sufijo
 static uint32_t mask_from_sufix(int sufijo) {
     if (sufijo == 0) return 0;
     // Primero, se crea un número de 32 bits, y se le pone un uno en la posición 32 - prefix (el /)
@@ -24,7 +23,7 @@ static uint32_t mask_from_sufix(int sufijo) {
     return htonl(~((1u << (32 - sufijo)) - 1));
 }
 
-/* Muestra mensaje de uso */
+// Muestra mensaje de uso
 static void usage(const char *prog) {
     fprintf(stderr, "Uso: %s <tabla> <ip_destino>\n", prog);
     exit(EXIT_FAILURE);
@@ -43,14 +42,34 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    route_t rutas[MAX_ROUTES];
+    // Reservamos dinámicamente espacio para las rutas
+    int capacidad = MAX_ROUTES;
+    route_t *rutas = malloc(capacidad * sizeof(route_t));
+    if (!rutas) {
+        perror("Error en malloc");
+        fclose(f);
+        exit(EXIT_FAILURE);
+    }
+
     int n = 0;
     char linea[MAX_LINE];
 
-    /* Leer la tabla de reenvío */
-    while (fgets(linea, sizeof(linea), f) && n < MAX_ROUTES) {
+    // Leer la tabla de reenvío
+    while (fgets(linea, sizeof(linea), f)) {
         if (linea[0] == '\n')
             continue;
+
+        if (n == capacidad) {
+            capacidad *= 2;
+            route_t *tmp = realloc(rutas, capacidad * sizeof(route_t));
+        if (!tmp) {
+                perror("Error en realloc");
+                free(rutas);
+                fclose(f);
+                exit(EXIT_FAILURE);
+            }
+            rutas = tmp;
+        }
 
         char *coma = strchr(linea, ',');
         if (!coma)
@@ -62,7 +81,7 @@ int main(int argc, char *argv[]) {
         rutas[n].iface = atoi(iface_str);
         rutas[n].net.s_addr = 0;
 
-        /* inet_net_pton convierte texto (IP/sufijo) a binario */
+        // inet_net_pton convierte texto (IP/sufijo) a binario
         rutas[n].sufijo = inet_net_pton(AF_INET, linea, &rutas[n].net, sizeof(struct in_addr));
         if (rutas[n].sufijo < 0) {
             fprintf(stderr, "Advertencia: formato inválido en línea: %s\n", linea);
@@ -74,18 +93,29 @@ int main(int argc, char *argv[]) {
     fclose(f);
 
     if (n == 0) {
-        fprintf(stderr, "Error: tabla vacía o inválida.\n");
-        exit(EXIT_FAILURE);
+        fprintf(stderr, "Error: tabla vacía o inválida.\nSe usa la red por defecto 0.0.0.0/0\n");
+        // Creamos la ruta por defecto manualmente
+        rutas = realloc(rutas, sizeof(route_t));
+        if (!rutas) {
+            perror("Error al crear ruta por defecto");
+            exit(EXIT_FAILURE);
+        }
+    
+        rutas[0].net.s_addr = inet_addr("0.0.0.0");
+        rutas[0].sufijo = 0;
+        rutas[0].iface = 0;
+        n = 1;
     }
 
-    /* Convertir IP destino a formato binario */
+    // Convertir IP destino a formato binario
     struct in_addr ip_dest;
     if (inet_pton(AF_INET, ip_dest_str, &ip_dest) != 1) {
+        free(rutas);
         fprintf(stderr, "Dirección IP destino inválida: %s\n", ip_dest_str);
         exit(EXIT_FAILURE);
     }
 
-    /* Buscar mejor coincidencia (sufijo más largo) */
+    // Buscar mejor coincidencia (sufijo más largo)
     int mejor_iface = 0;       // interfaz por defecto
     int mejor_sufijo = -1;
     struct in_addr mejor_red;
@@ -112,12 +142,18 @@ int main(int argc, char *argv[]) {
         mejor_sufijo = 0;
 
     char red_str[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &mejor_red, red_str, sizeof(red_str));
+    if (inet_ntop(AF_INET, &mejor_red, red_str, sizeof(red_str)) == NULL) {
+        free(rutas);
+        fprintf(stderr, "Dirección IP de mejor red de la tabla  inválida: %s\n", red_str);
+        exit(EXIT_FAILURE);
+    }
    
     printf("IP destino: %s\n", ip_dest_str);
     printf("Coincide con red: %s/%d\n", red_str, mejor_sufijo);
     printf("Interfaz de salida: %d\n", mejor_iface);
     printf("Sufijo aplicado: %d bits\n", mejor_sufijo);
+
+    free(rutas);
 
     return 0;
 }
